@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>WeatherHelper</RootNamespace>
+    <!-- 程序集名保持 ASCII：非 ASCII 构建产物路径会和 cmd.exe 代码页、部分工具链冲突。
+         中文名在复制到桌面时再套用（见 build\deploy-desktop.ps1）。 -->
+    <AssemblyName>WeatherHelper</AssemblyName>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationVisualStyles>true</ApplicationVisualStyles>
+    <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
+    <DebugType>embedded</DebugType>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- 以下两项必须保持 false：
+         PublishTrimmed —— WinForms 不支持裁剪，会以费解的方式失败；
+         PublishReadyToRun —— 需要本机缺失的运行时包。 -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <!-- 单文件发布相关：把 WindowsDesktop 的原生依赖（D3DCompiler_47_cor3.dll 等）也打进
+         exe，否则它们会散落在 exe 旁边，就不是"一个 exe"了。 -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WeatherHelper.Core\WeatherHelper.Core.csproj" />
+  </ItemGroup>
+
+</Project>

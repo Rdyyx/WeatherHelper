@@ -10,26 +10,33 @@ namespace WeatherHelper.Ui;
 /// 其余内容（体感、湿度、风、降水量、更新时间、数据源）都在悬停提示里，一个字段都不少。
 ///
 /// 透明靠 WinForms 的键控透明（<see cref="Form.TransparencyKey"/>）：窗体底色和透明色都设成
-/// 白色，于是除文字和图标以外的像素在系统层面就是「洞」——能看到壁纸，
+/// 同一个值（浅色模式是白、深色模式是黑），于是除文字和图标以外的像素在系统层面就是「洞」——能看到壁纸，
 /// 鼠标也会直接穿过去点到下面的窗口。也就是说<b>只有文字本身能拖、能右键、能悬停</b>。
-/// 这是「绝对全透明」的代价，取舍见计划文档；真嫌难抓，把 <see cref="Key"/> 从纯白改成
+/// 这是「绝对全透明」的代价，取舍见计划文档；真嫌难抓，把当前主题的 <c>Key</c> 从纯白改成
 /// <c>RGB(254,254,254)</c> 就能让整块区域都可交互，而肉眼几乎看不出那层底板。
+///
+/// 配色只有深/浅两套（<see cref="LightTheme"/> / <see cref="DarkTheme"/>），在右键菜单里手动切，
+/// 记在 ui.json 里；它只影响桌宠自己，主窗口和托盘一概不动。
 /// </summary>
 internal sealed class PetForm : Form
 {
     /// <summary>
-    /// 既是窗体底色也是透明色，所以最后只有文字像素留下。
+    /// 深/浅色模式下桌宠的三组取色。<see cref="Key"/> 既是窗体底色也是透明色，
+    /// 所以最后只有文字像素留下。
     ///
-    /// 这里用白而不是黑：桌宠的文字是黑的，透明色一旦也用黑，黑色字形本身的像素会被当成
-    /// 透明色整块挖掉 —— 文字会直接消失。反过来用白，抗锯齿边缘会自然混出一圈淡淡的白描边。
+    /// 每个主题里，<see cref="Key"/> 都必须和该主题的文字/图标<b>不同色</b>：
+    /// 透明色一旦和字形同色，字形本身的像素会被当成透明色整块挖掉 —— 文字会直接消失。
+    /// 浅色模式是「透明白 + 黑字」，于是抗锯齿边缘自然混出一圈淡淡的白描边；
+    /// 深色模式是它的镜像「透明黑 + 近白字」，描边反过来融进深色壁纸。
+    /// 也就是说<b>深色模式不能只改 <see cref="Text"/>，必须连 <see cref="Key"/> 一起翻</b>。
     /// </summary>
-    private static readonly Color Key = Color.White;
+    private readonly record struct PetTheme(Color Key, Color Icon, Color Text);
 
-    /// <summary>天气符号沿用主窗口「实时天气」那个深蓝，和弹窗里看着是一套。</summary>
-    private static readonly Color IconColor = Color.FromArgb(70, 110, 160);
+    /// <summary>浅色：透明底白，文字纯黑，天气符号沿用主窗口「实时天气」那个深蓝。</summary>
+    private static readonly PetTheme LightTheme = new(Color.White, Color.FromArgb(70, 110, 160), Color.Black);
 
-    /// <summary>文字用纯黑。</summary>
-    private static readonly Color TextColor = Color.Black;
+    /// <summary>深色：透明底黑，文字近白（不用纯白，否则抗锯齿会往透明色上靠而发虚），符号提亮成浅蓝。</summary>
+    private static readonly PetTheme DarkTheme = new(Color.Black, Color.FromArgb(130, 175, 225), Color.FromArgb(240, 240, 240));
 
     private const int WM_NCLBUTTONDOWN = 0x00A1;
     private const int HTCAPTION = 2;
@@ -37,6 +44,10 @@ internal sealed class PetForm : Form
 
     private readonly WeatherHub _hub;
     private readonly ContextMenuStrip _menu = new();
+
+    /// <summary>右键菜单里的「深色模式」，勾选状态就是当前模式。</summary>
+    private readonly ToolStripMenuItem _miDarkMode = new("深色模式") { CheckOnClick = true };
+
     private readonly ToolTip _tip = new()
     {
         ShowAlways = true,      // 窗口没被激活时也要能弹出来
@@ -48,6 +59,9 @@ internal sealed class PetForm : Form
     private readonly Label _lblIcon = new();
     private readonly Label _lblTemp = new();
     private readonly Label _lblPlace = new();
+
+    /// <summary>当前是不是深色模式（只影响桌宠自己的配色，和弹窗无关）。</summary>
+    private bool _darkMode;
 
     /// <summary>桌宠没有关闭按钮，但 Alt+F4 能碰到它。只有「退出程序」才是真关。</summary>
     private bool _reallyClosing;
@@ -65,6 +79,11 @@ internal sealed class PetForm : Form
     {
         _hub = hub;
 
+        // 主题必须在窗口句柄创建之前定下来：这样启动时是「一开始就带着正确的透明色建窗」，
+        // 只有用户点菜单切换才需要运行时改透明色。位置仍在 OnLoad 里读 ——
+        // 它要用 Width/Height 算右下角的默认位，两处各读一次 ui.json，文件很小，不值得为此重构。
+        _darkMode = UiStateStore.Load().PetDarkMode;
+
         Text = "天气桌宠";
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -73,8 +92,8 @@ internal sealed class PetForm : Form
         AutoSize = true;                        // 窗体缩到内容大小；反正透明区域看不见
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         AutoScaleMode = AutoScaleMode.Font;
-        BackColor = Key;
-        TransparencyKey = Key;                  // WinForms 会顺带补上 WS_EX_LAYERED
+
+        ApplyTheme();                           // 底色 + 透明色 + 文字/图标色，一次定好
 
         BuildLayout();
         BuildMenu();
@@ -141,10 +160,50 @@ internal sealed class PetForm : Form
         }
     }
 
+    // ────────────────────────────── 主题 ──────────────────────────────
+
+    /// <summary>当前生效的一套取色。深色模式只改桌宠自己，弹窗和托盘一概不动。</summary>
+    private PetTheme Theme => _darkMode ? DarkTheme : LightTheme;
+
+    /// <summary>
+    /// 把当前主题刷到窗体和三个 Label 上。构造时调一次，用户点菜单切换时再调。
+    ///
+    /// 切换时透明色是<b>运行时</b>改的，所以末尾必须强制整窗重绘一次，
+    /// 否则键控透明会留下上一套配色的残影。（透明色本身一直非空，
+    /// 句柄建出来就带着 WS_EX_LAYERED，这里只是换个色键，不需要重建窗口。）
+    /// </summary>
+    private void ApplyTheme()
+    {
+        var theme = Theme;
+
+        BackColor = theme.Key;
+        TransparencyKey = theme.Key;
+
+        _lblIcon.ForeColor = theme.Icon;
+        _lblTemp.ForeColor = theme.Text;
+        _lblPlace.ForeColor = theme.Text;
+
+        Refresh();      // 等价于 Invalidate(true) + Update()，连子控件一起重画
+    }
+
+    /// <summary>
+    /// 菜单里勾一下即切换（<see cref="ToolStripMenuItem.CheckOnClick"/> 已经翻好了 Checked）。
+    /// 落盘沿用 <see cref="SavePosition"/> 那套「读-改-写」：直接 Save 一个新对象
+    /// 会把位置和自动刷新开关冲成默认值。
+    /// </summary>
+    private void MiDarkMode_CheckedChanged(object? sender, EventArgs e)
+    {
+        _darkMode = _miDarkMode.Checked;
+        ApplyTheme();
+        UiStateStore.Save(UiStateStore.Load() with { PetDarkMode = _darkMode });
+    }
+
     // ────────────────────────────── 布局 ──────────────────────────────
 
     private void BuildLayout()
     {
+        var theme = Theme;
+
         var root = new TableLayoutPanel
         {
             AutoSize = true,
@@ -159,7 +218,7 @@ internal sealed class PetForm : Form
         _lblIcon.AutoSize = true;
         _lblIcon.BackColor = Color.Transparent;
         _lblIcon.Font = UiFonts.Icon(34f);
-        _lblIcon.ForeColor = IconColor;
+        _lblIcon.ForeColor = theme.Icon;
         _lblIcon.Margin = new Padding(0, 0, 8, 0);
         _lblIcon.Text = Format.Dash;
 
@@ -177,14 +236,14 @@ internal sealed class PetForm : Form
         _lblTemp.AutoSize = true;
         _lblTemp.BackColor = Color.Transparent;
         _lblTemp.Font = UiFonts.Ui(22f, FontStyle.Bold);
-        _lblTemp.ForeColor = TextColor;
+        _lblTemp.ForeColor = theme.Text;
         _lblTemp.Margin = new Padding(0);
         _lblTemp.Text = Format.Dash;
 
         _lblPlace.AutoSize = true;
         _lblPlace.BackColor = Color.Transparent;
         _lblPlace.Font = UiFonts.Ui(9.5f);
-        _lblPlace.ForeColor = TextColor;
+        _lblPlace.ForeColor = theme.Text;
         _lblPlace.Margin = new Padding(0);
         _lblPlace.Text = "尚未查询";
 
@@ -210,6 +269,13 @@ internal sealed class PetForm : Form
         _menu.Items.Add(new ToolStripMenuItem("打开主窗口", null, (_, _) => OpenMainWindow?.Invoke(this, EventArgs.Empty)));
         _menu.Items.Add(new ToolStripMenuItem("刷新天气", null, (_, _) => _hub.RefreshLast()));
         _menu.Items.Add(new ToolStripMenuItem("隐藏到托盘", null, (_, _) => Hide()));
+        _menu.Items.Add(new ToolStripSeparator());
+
+        // 先同步勾选状态再挂事件：初始化赋值不该触发一次落盘。
+        _miDarkMode.Checked = _darkMode;
+        _miDarkMode.CheckedChanged += MiDarkMode_CheckedChanged;
+        _menu.Items.Add(_miDarkMode);
+
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(new ToolStripMenuItem("退出程序", null, (_, _) => ExitRequested?.Invoke(this, EventArgs.Empty)));
 

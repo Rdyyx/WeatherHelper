@@ -53,4 +53,26 @@ public static class Format
             ? parsed.ToString("HH:mm", CultureInfo.InvariantCulture)
             : isoLocalTime;
     }
+
+    /// <summary>
+    /// 实况的明细行，形如「湿度 45%    风 东南风 12.3 km/h    降水量 —」。
+    /// 主窗口的「实时天气」和桌宠的悬停提示共用同一份拼法，免得两边对不上。
+    /// </summary>
+    public static string Details(CurrentWeather current)
+        => $"湿度 {Percent(current.Humidity)}"
+         + $"    风 {current.WindText}"
+         + $"    降水量 {Millimeters(current.PrecipitationMm)}";
+
+    /// <summary>
+    /// 数据新鲜度，形如「更新于 2026-10-15 20:10（Asia/Shanghai）· 共 7 天预报 / 24 条逐时」。
+    /// </summary>
+    public static string Updated(WeatherReport report)
+    {
+        var time = report.Current.LocalTime is { } local
+            ? local.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
+            : "未知";
+
+        var zone = string.IsNullOrWhiteSpace(report.Place.TimeZone) ? string.Empty : $"（{report.Place.TimeZone}）";
+        return $"更新于 {time}{zone} · 共 {report.Days.Count} 天预报 / {report.Hours.Count} 条逐时";
+    }
 }

@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -31,22 +30,23 @@ internal sealed class MainForm : Form
     private readonly ToolStripStatusLabel _lblElapsed = new();
     private readonly ToolStripProgressBar _pbBusy = new();
 
-    private readonly WeatherService _service = new();
+    private readonly WeatherHub _hub;
     private readonly string? _startupCity;
 
-    private CancellationTokenSource? _cts;
-    private bool _busy;
-    private WeatherReport? _lastReport;
+    /// <summary>点 × 只是把窗口收起来。只有「退出程序」才先把它置 true 再关。</summary>
+    private bool _reallyClosing;
 
-    // 自动刷新：查询成功过、且当前有城市在框里时才启用；查询失败/取消则停表，等用户下次手动点。
-    private readonly System.Windows.Forms.Timer _autoRefresh = new() { Interval = AutoRefreshIntervalMs };
-    private const int AutoRefreshIntervalMs = 30 * 60 * 1000;   // 30 分钟
+    /// <summary>WndProc 里转发 WM_CLOSE 时的重入标志。</summary>
+    private bool _routingClose;
 
-    public MainForm(string? startupCity)
+    public MainForm(WeatherHub hub, string? startupCity)
     {
+        _hub = hub;
         _startupCity = startupCity;
 
         Text = "天气查询助手";
+        // 标题栏/任务栏/Alt+Tab 用这张图；exe 文件本身那个由 csproj 的 ApplicationIcon 负责。
+        Icon = AppIcon.Value;
         ClientSize = new Size(840, 680);
         MinimumSize = new Size(680, 540);
         StartPosition = FormStartPosition.CenterScreen;
@@ -54,6 +54,9 @@ internal sealed class MainForm : Form
         KeyPreview = true;
 
         BuildLayout();
+
+        // 联网、定时器、当前数据都归 hub，这个窗口只是它的一个视图
+        _hub.Changed += OnHubChanged;
 
         AcceptButton = _btnQuery;
         _cmbCity.Focus();
@@ -283,7 +286,7 @@ internal sealed class MainForm : Form
 
         _lblSource.Spring = true;
         _lblSource.TextAlign = ContentAlignment.MiddleLeft;
-        _lblSource.Text = $"降级顺序：{_service.Name}";
+        _lblSource.Text = $"降级顺序：{_hub.SourceName}";
 
         _pbBusy.Style = ProgressBarStyle.Marquee;
         _pbBusy.MarqueeAnimationSpeed = 30;
@@ -352,28 +355,70 @@ internal sealed class MainForm : Form
         base.OnShown(e);
 
         SetCueBanner(_cmbCity, "输入地点，例如：北京 / 上海 / 深圳 / Tokyo");
-        var history = HistoryStore.Load();
-        ApplyHistory(history);
+        ApplyHistory(_hub.History);
 
         // 记住上次查询的城市：历史里最新一条（第 0 条）预填进输入框，方便直接回车查询。
-        if (string.IsNullOrWhiteSpace(_startupCity) && history.Count > 0)
-            _cmbCity.Text = history[0];
+        // 只在框里空着时填 —— 收起来再打开不该把用户刚敲进去的地名冲掉。
+        if (string.IsNullOrWhiteSpace(_startupCity) && _cmbCity.Text.Trim().Length == 0 && _hub.History.Count > 0)
+            _cmbCity.Text = _hub.History[0];
 
         if (!string.IsNullOrWhiteSpace(_startupCity))
-        {
             _cmbCity.Text = _startupCity;
-            BtnQuery_Click(this, EventArgs.Empty);
-        }
 
-        _autoRefresh.Tick += (_, _) => AutoRefreshTick();
+        // 勾选框反映 hub 的真实状态（桌宠常驻，默认就是开着的）。
+        // 启动时那次查询由 hub 负责，这里不再自己查一遍。
+        _chkAutoRefresh.Checked = _hub.AutoRefreshEnabled;
+
+        RenderFromHub();
+    }
+
+    private void OnHubChanged(object? sender, EventArgs e) => RenderFromHub();
+
+    /// <summary>「退出程序」走这条路才是真关；否则 OnFormClosing 会把它拦成"隐藏"。</summary>
+    internal void CloseForExit()
+    {
+        _reallyClosing = true;
+        Close();
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        // 退订：程序退出时可能还有一次查询的续体排在消息队列里，别让它去碰已销毁的控件
+        _hub.Changed -= OnHubChanged;
+        base.OnFormClosed(e);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        _autoRefresh.Stop();
-        _autoRefresh.Dispose();
-        _cts?.Cancel();
+        // 关掉不等于退出：把窗口收起来，桌宠继续在桌面上跑。
+        // 只有系统强制的关闭（关机、任务管理器结束进程）不能拦，否则会卡住关机。
+        if (!_reallyClosing && !CloseRules.IsForced(e.CloseReason))
+        {
+            e.Cancel = true;
+            Hide();
+            return;
+        }
+
         base.OnFormClosing(e);
+    }
+
+    /// <summary>
+    /// 别的进程直接发来的 WM_CLOSE（任务管理器之类）不会走 <see cref="OnFormClosing"/>，
+    /// 而是把窗口直接销毁掉 —— 句柄一旦没了，之后再 Show() 只能整条重建。
+    /// 这里把它转成 <see cref="Form.Close"/>，让它老老实实走正常流程（→ OnFormClosing → 隐藏）。
+    /// 重入标志是必须的：<c>Close()</c> 自己也是发 WM_CLOSE。
+    /// </summary>
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == CloseRules.WmClose && !_routingClose)
+        {
+            _routingClose = true;
+            try { Close(); }
+            finally { _routingClose = false; }
+            return;
+        }
+
+        base.WndProc(ref m);
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -388,54 +433,31 @@ internal sealed class MainForm : Form
 
     private async void BtnQuery_Click(object? sender, EventArgs e)
     {
-        // 按钮在查询期间是禁用的，这里再兜一道，防止 F5 或启动参数重入
-        if (_busy) return;
+        // 重入保护、取消、错误分类都在 WeatherHub 里，这里只负责把输入框的地名递过去
+        if (_hub.IsBusy) return;
 
-        var city = _cmbCity.Text.Trim();
-        if (city.Length == 0)
+        if (_cmbCity.Text.Trim().Length == 0)
         {
-            SetBusy(false, "请先输入要查询的地点。", isError: true);
+            await _hub.QueryAsync(string.Empty);   // 让 hub 统一报「请先输入要查询的地点。」
             _cmbCity.Focus();
             return;
         }
 
-        _busy = true;
-        _cts?.Dispose();
-        _cts = new CancellationTokenSource();
-        var token = _cts.Token;
+        await _hub.QueryAsync(_cmbCity.Text);
+    }
 
-        var stopwatch = Stopwatch.StartNew();
-        SetBusy(true, $"正在联网查询「{city}」…");
+    /// <summary>
+    /// 唯一的渲染入口。hub 一变就整体重绘，所以「自己点了一次查询」和「被 hub 通知了一次」
+    /// 不会各画一遍 —— 那本来就是同一次变化。
+    /// </summary>
+    private void RenderFromHub()
+    {
+        SetBusy(_hub.IsBusy, _hub.LastStatus, _hub.LastStatusIsError);
+        _lblElapsed.Text = _hub.LastElapsedMs > 0 ? $"耗时 {_hub.LastElapsedMs} ms" : string.Empty;
 
-        try
-        {
-            var report = await _service.GetWeatherAsync(city, token);
+        if (_hub.LastReport is { } report) RenderReport(report);
 
-            RenderReport(report);
-            ApplyHistory(HistoryStore.Add(city));
-
-            stopwatch.Stop();
-            SetBusy(false, $"已更新「{report.Place.DisplayName}」的天气。");
-            _lblElapsed.Text = $"耗时 {stopwatch.ElapsedMilliseconds} ms";
-        }
-        catch (OperationCanceledException)
-        {
-            SetBusy(false, "已取消查询。");
-        }
-        catch (WeatherException error)
-        {
-            SetBusy(false, error.Message, isError: true);
-        }
-        catch (Exception error)
-        {
-            SetBusy(false, "发生未知错误：" + error.Message, isError: true);
-        }
-        finally
-        {
-            _busy = false;
-            _cts?.Dispose();
-            _cts = null;
-        }
+        ApplyHistory(_hub.History);
     }
 
     private void SetBusy(bool busy, string status, bool isError = false)
@@ -457,10 +479,8 @@ internal sealed class MainForm : Form
         _lblIcon.Text = current.Icon;
         _lblTemp.Text = Format.Temp(current.TemperatureC);
         _lblDesc.Text = $"{current.Description} · 体感 {Format.Temp(current.ApparentC)}";
-        _lblDetails.Text = $"湿度 {Format.Percent(current.Humidity)}"
-                         + $"    风 {current.WindText}"
-                         + $"    降水量 {Format.Millimeters(current.PrecipitationMm)}";
-        _lblUpdated.Text = BuildUpdatedText(report);
+        _lblDetails.Text = Format.Details(current);
+        _lblUpdated.Text = Format.Updated(report);
 
         _dgvDaily.Rows.Clear();
         foreach (var day in report.Days)
@@ -487,47 +507,20 @@ internal sealed class MainForm : Form
 
         _lblSource.Text = $"数据来源：{report.Source}";
 
-        // 有新数据：解锁复制按钮，并在勾选了自动刷新时启动定时器
-        _lastReport = report;
+        // 有新数据才能复制简报。自动刷新归 hub 管，这里不用操心。
         _btnCopy.Enabled = true;
-        ArmAutoRefresh();
     }
 
-    // ────────────────────────────── 新增功能 ──────────────────────────────
+    // ────────────────────────────── 自动刷新 / 复制简报 ──────────────────────────────
 
     private void ChkAutoRefresh_CheckedChanged(object? sender, EventArgs e)
-    {
-        if (_chkAutoRefresh.Checked)
-            ArmAutoRefresh();
-        else
-            _autoRefresh.Stop();
-    }
-
-    /// <summary>勾选了自动刷新、且刚有成功数据时才启动；否则停住等下一次成功。</summary>
-    private void ArmAutoRefresh()
-    {
-        if (_chkAutoRefresh.Checked && _lastReport is not null && !_busy)
-            _autoRefresh.Start();
-        else
-            _autoRefresh.Stop();
-    }
-
-    private void AutoRefreshTick()
-    {
-        // 定时器到点：把当前（上次成功）的城市重新查一遍。查询期间 _busy 会挡住重入。
-        if (_chkAutoRefresh.Checked && _lastReport is not null)
-        {
-            _cmbCity.Text = _lastReport.Place.Name;
-            BtnQuery_Click(this, EventArgs.Empty);
-        }
-    }
+        => _hub.AutoRefreshEnabled = _chkAutoRefresh.Checked;
 
     /// <summary>把当前天气整理成一段适合粘贴/转发的中文简报，复制到剪贴板。</summary>
     private void BtnCopy_Click(object? sender, EventArgs e)
     {
-        if (_lastReport is null) return;
+        if (_hub.LastReport is not { } report) return;
 
-        var report = _lastReport;
         var current = report.Current;
         var builder = new StringBuilder();
 
@@ -564,16 +557,6 @@ internal sealed class MainForm : Form
         {
             SetBusy(false, "复制失败：" + ex.Message, isError: true);
         }
-    }
-
-    private static string BuildUpdatedText(WeatherReport report)
-    {
-        var time = report.Current.LocalTime is { } local
-            ? local.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
-            : "未知";
-
-        var zone = string.IsNullOrWhiteSpace(report.Place.TimeZone) ? string.Empty : $"（{report.Place.TimeZone}）";
-        return $"更新于 {time}{zone} · 共 {report.Days.Count} 天预报 / {report.Hours.Count} 条逐时";
     }
 
     /// <summary>重建下拉项的同时保留输入框里已有的文字。</summary>

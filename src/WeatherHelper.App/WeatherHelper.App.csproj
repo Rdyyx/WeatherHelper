@@ -11,6 +11,9 @@
     <!-- 程序集名保持 ASCII：非 ASCII 构建产物路径会和 cmd.exe 代码页、部分工具链冲突。
          中文名在复制到桌面时再套用（见 build\deploy-desktop.ps1）。 -->
     <AssemblyName>WeatherHelper</AssemblyName>
+    <!-- 图标：app.ico 是在 build/make-icon.ps1 里从 images/Logo.PNG 生成出来的。
+         这一项把它写进 exe 的 Win32 图标资源 —— 资源管理器、快捷方式里看到的就是它。 -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationVisualStyles>true</ApplicationVisualStyles>
     <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
@@ -26,6 +29,13 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
+
+  <!-- 同一份 .ico 再嵌一份进程序集，运行时给窗口标题栏/任务栏用：
+       单文件自包含发布不会把 app.ico 释放到 exe 旁边，所以不能按路径读。
+       LogicalName 必须和 Ui/AppIcon.cs 里的 ResourceName 一致。 -->
+  <ItemGroup>
+    <EmbeddedResource Include="app.ico" LogicalName="WeatherHelper.app.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\WeatherHelper.Core\WeatherHelper.Core.csproj" />
